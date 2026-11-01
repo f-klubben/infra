@@ -1,62 +1,250 @@
-bread.{$DOMAIN}:80 {
-	root * /www/bread
-	file_server
+# Caddy handles TLS and certificates for every site. Mailman is the only thing still in Apache, on 127.0.0.1:8888.
+{
+	email fit@fklub.dk
+	# Only Caddy and root can open this socket, so other local users cannot change the config.
+	admin unix//run/caddy/admin.sock
+	servers {
+		# ufw does not allow UDP 443, so do not advertise HTTP/3.
+		protocols h1 h2
+	}
 }
 
-coffee.{$DOMAIN}:80 {
-	root * /www/coffee
-	file_server
+# Compression and access logs for every site. Logs are kept 14 days, as Apache's were.
+(site) {
+	encode zstd gzip
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 100MiB
+			roll_keep_for 336h
+		}
+	}
 }
 
-docs.{$DOMAIN}:80 {
-	root * /www/docs.fklub.dk
-	file_server
+# University network and VPN. The public ranges are registered to Aalborg University in RIPE.
+(uni_network) {
+	@uni_network client_ip 10.0.0.0/8 172.16.0.0/12 130.225.192.0/21 130.225.48.0/20 192.38.48.0/20 2001:878:300::/44
 }
 
-facking.{$DOMAIN}:80 {
-	root * /www/facking
-	file_server
+# Everyone outside the network logs in with an account from /etc/caddy/users.caddy, which is outside this repo.
+(login) {
+	basic_auth bcrypt "F-klubben" {
+		import /etc/caddy/users.caddy
+	}
 }
 
-fapp.{$DOMAIN}:80, app.{$DOMAIN}:80 {
-	redir https://fappen.{$DOMAIN}
+(login_message) {
+	handle_errors 401 {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "Denne side kræver et login uden for AAU-netværket og VPN.
+Hvis du har brug for adgang, så tal med en ansvarlig for at få et login.
+Hvis du er på AAU-netværket med en iPhone, så slå Privat relæ fra.
+Hvis noget andet er i stykker, så få fat i Lennart (Deekahy) og fortæl ham, hvad han har fucket op.
+
+This page needs a login outside the AAU network and the VPN.
+If you need access, talk to someone responsible to get a login.
+If you are on the AAU network with an iPhone, turn off Private Relay.
+If something else is broken, get ahold of Lennart (Deekahy) and tell him what he fucked up." 401
+	}
 }
 
-fappen.{$DOMAIN}:80 {
-	root * /www/fappen.fklub.dk
-	file_server
+(stregsystem_site) {
+	# Closed rooms go to the main room. To open one for an occasion, remove it from this list.
+	@closed_rooms path_regexp ^/(1|2|3|5|6|7|8|9|11|15|16)(/.*)?$
+	redir @closed_rooms /10/
+
+	handle_path /static/* {
+		root * /data/stregsystem/static
+		file_server
+	}
+	handle_path /media/* {
+		root * /data/stregsystem/media
+		# Kiosk images change, so browsers must not cache them.
+		@images path *.png *.jpg
+		header @images Cache-Control "max-age=0, no-cache, no-store, must-revalidate"
+		file_server {
+			hide .htaccess
+		}
+	}
+	handle {
+		reverse_proxy unix//run/stregsystem.sock
+	}
 }
 
-fritfit.{$DOMAIN}:80 {
-	root * /www/fritfit.fklub.dk
-	file_server
+(static) {
+	import site
+	root * {args[0]}
+	file_server {
+		hide .git .gitignore .idea
+	}
 }
 
-hello.staging.{$DOMAIN}:80 {
+# Unknown hostnames on port 80 go to the wiki. There is no certificate for them on 443.
+http:// {
+	redir https://fklub.dk{uri} permanent
+}
+
+# staging.fklub.dk has no site of its own. It reached the wiki through Apache's catch-all, so it stays here for now.
+fklub.dk, www.fklub.dk, fff.fklub.dk, fklub.cs.aau.dk, staging.fklub.dk {
+	import site
+	redir /ical/fember.ics https://calendar.google.com/calendar/ical/fke9k8sbuqttoif5ff7ccbb0bc%40group.calendar.google.com/public/basic.ics
+	redir /ical/frivillig.ics https://calendar.google.com/calendar/ical/57a0e9bcc00b07d48d08d1aaa8c26f9c8345f96fdf8849f444251f417af9284e%40group.calendar.google.com/public/basic.ics
+
+	@booking path /bookaau /bookaau/* /aaubooking /aaubooking/*
+	redir @booking https://forms.office.com/pages/responsepage.aspx?id=Sbrb9QbOb0msPgzxQ2HZNMFGXdYJ2NRJiGVt0NKQxHFUMUNGVVpFQjFTNTBDSkdNVlE4TUdHSksxOSQlQCN0PWcu&route=shorturl
+
+	@adsl path /adsl /adsl/*
+	redir @adsl https://www.aauvalg.aau.dk/sadan-stemmer-du#log-ind-i-e-valgsystemet-for-at-stemme
+
+	@fappen2 path /fappen2 /fappen2/*
+	redir @fappen2 https://refactor-rework-song-build-s.fappen.pages.dev
+
+	# Moved as they were from Apache. Going by the names, these reach two Stregsystem Pis.
+	handle_path /erstregsystemetspinede* {
+		reverse_proxy 172.25.11.72:8000
+	}
+	handle_path /erstregsystemetspiikantinennede* {
+		reverse_proxy 172.25.11.74:8000
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8090
+	}
+}
+
+bread.fklub.dk {
+	import static /srv/static/bread
+}
+
+docs.fklub.dk {
+	import static /srv/static/docs
+}
+
+facking.fklub.dk {
+	import static /srv/static/facking
+}
+
+fappen.fklub.dk {
+	import static /srv/static/fappen
+}
+
+fritfit.fklub.dk {
+	import static /srv/static/fritfit
+}
+
+messe.fklub.dk {
+	import static /srv/static/messe
+}
+
+okboomer.fklub.dk {
+	import static /srv/static/okboomer
+}
+
+static.fklub.dk {
+	import static /srv/static/static
+}
+
+test.fklub.dk {
+	import static /srv/static/test
+}
+
+fapp.fklub.dk, app.fklub.dk {
+	import site
+	redir https://fappen.fklub.dk
+}
+
+hello.staging.fklub.dk {
+	import site
 	respond "Hello, World!"
 }
 
-messe.{$DOMAIN}:80 {
-	root * /www/messe
-	file_server
+coffee.fklub.dk {
+	import static /srv/coffee/generator/html
 }
 
-okboomer.{$DOMAIN}:80 {
-	root * /www/okboomer
-	file_server
+random.fklub.dk {
+	import site
+	import uni_network
+	import login_message
+	handle @uni_network {
+		reverse_proxy 127.0.0.1:8092
+	}
+	handle {
+		import login
+		reverse_proxy 127.0.0.1:8092
+	}
 }
 
-static.{$DOMAIN}:80 {
-	root * /www/wwwstatic
-	file_server
+# No login on the university network or VPN, because random and the info screens need the gallery.
+farcheology.fklub.dk {
+	import site
+	import uni_network
+	import login_message
+	handle @uni_network {
+		reverse_proxy 127.0.0.1:8093
+	}
+	handle {
+		import login
+		reverse_proxy 127.0.0.1:8093
+	}
 }
 
-api.stregsystem.{$DOMAIN}:80 {
-	root * /www/api.stregsystem.fklub.dk
-	file_server
+# listadmin on this server uses http://, and does not follow redirects. /etc/hosts points this
+# hostname at 127.0.0.1, so its traffic stays on this machine. Everyone else goes to HTTPS.
+http://lists.fklub.dk {
+	import site
+	@this_server client_ip 127.0.0.1/32
+	handle @this_server {
+		reverse_proxy 127.0.0.1:8888
+	}
+	handle {
+		redir https://{host}{uri} 308
+	}
 }
 
-test.{$DOMAIN}:80 {
-	root * /www/test
-	file_server
+# Everything but phpMyAdmin on this hostname is Mailman, still in Apache on 127.0.0.1:8888.
+lists.fklub.dk {
+	import site
+	import uni_network
+	import login_message
+	redir /phpmyadmin /phpmyadmin/ 308
+	handle_path /phpmyadmin/* {
+		handle @uni_network {
+			reverse_proxy 127.0.0.1:8091
+		}
+		handle {
+			import login
+			reverse_proxy 127.0.0.1:8091
+		}
+	}
+	redir / /listinfo permanent
+	handle {
+		reverse_proxy 127.0.0.1:8888
+	}
+}
+
+stregsystemet.fklub.dk {
+	import site
+	redir https://stregsystem.fklub.dk{uri} permanent
+}
+
+# The allowlist is outside this repo, because it lists people's homes.
+# It might get completely removed in favour of a login. See the README.
+stregsystem.fklub.dk {
+	import site
+	import /etc/caddy/stregsystem-allowlist.caddy
+	import login_message
+
+	handle @stregsystem_allowed {
+		import stregsystem_site
+	}
+
+	handle {
+		import login
+		import stregsystem_site
+	}
+}
+
+# This moves to /srv when Stregsystem moves.
+api.stregsystem.fklub.dk {
+	import static /data/stregsystem/openapi/out
 }
